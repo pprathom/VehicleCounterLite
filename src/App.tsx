@@ -85,6 +85,7 @@ export default function App() {
   const lastDetectionsRef = useRef<cocoSsd.DetectedObject[]>([]);
   const lastVideoTimeRef = useRef<number>(0);
   const stuckDurationRef = useRef<number>(0);
+  const lastDetectionTimeRef = useRef<number>(0);
 
   // State
   const [isLoading, setIsLoading] = useState(true);
@@ -105,6 +106,7 @@ export default function App() {
   const [modelBase, setModelBase] = useState<'lite_mobilenet_v2' | 'mobilenet_v2' | 'mobilenet_v1'>('lite_mobilenet_v2');
   const [isModelLoading, setIsModelLoading] = useState(false);
   const [facingMode, setFacingMode] = useState<'user' | 'environment'>('environment');
+  const [detectionInterval, setDetectionInterval] = useState(80); // Default 80ms (~12 FPS)
 
   useEffect(() => {
     if (source !== 'stream' || !isPlaying) {
@@ -143,6 +145,7 @@ export default function App() {
       try {
         setIsModelLoading(true);
         await tf.ready();
+        console.log("TF.js Backend:", tf.getBackend());
         const model = await cocoSsd.load({ base: modelBase });
         modelRef.current = model;
         setIsLoading(false);
@@ -398,13 +401,20 @@ export default function App() {
     if (!videoRef.current || !modelRef.current) return;
     if (!isPlaying) return;
 
-    const detections = await modelRef.current.detect(videoRef.current);
-    const mappedDetections = detections.map(d => ({
-      ...d,
-      class: (d.class === 'person' || d.class === 'bicycle') ? 'motorcycle' : d.class
-    }));
-    lastDetectionsRef.current = mappedDetections;
-    processDetections(mappedDetections);
+    const now = Date.now();
+    // Throttle detection to prevent UI stuttering
+    if (now - lastDetectionTimeRef.current >= detectionInterval) {
+      lastDetectionTimeRef.current = now;
+      const detections = await modelRef.current.detect(videoRef.current);
+      const mappedDetections = detections.map(d => ({
+        ...d,
+        class: (d.class === 'person' || d.class === 'bicycle') ? 'motorcycle' : d.class
+      }));
+      lastDetectionsRef.current = mappedDetections;
+      processDetections(mappedDetections);
+    }
+    
+    // Always render the current state (including drawing previews)
     render();
 
     if (isPlaying) {
@@ -842,14 +852,14 @@ export default function App() {
       {/* Settings Modal */}
       {showSettings && (
         <div className="fixed inset-0 z-[100] flex items-center justify-center p-4 bg-black/80 backdrop-blur-sm animate-in fade-in duration-200">
-          <div className="bg-zinc-900 border border-zinc-800 rounded-3xl w-full max-w-md overflow-hidden shadow-2xl">
-            <div className="p-6 border-b border-zinc-800 flex items-center justify-between">
+          <div className="bg-zinc-900 border border-zinc-800 rounded-3xl w-full max-w-md max-h-[90vh] flex flex-col overflow-hidden shadow-2xl">
+            <div className="p-6 border-b border-zinc-800 flex items-center justify-between shrink-0">
               <h2 className="text-xl font-bold">Detection Settings</h2>
               <button onClick={() => setShowSettings(false)} className="p-2 hover:bg-zinc-800 rounded-full">
                 <X className="w-5 h-5" />
               </button>
             </div>
-            <div className="p-6 space-y-6">
+            <div className="p-6 space-y-6 overflow-y-auto custom-scrollbar">
               {/* Model Selection */}
               <div className="space-y-3">
                 <label className="text-sm font-medium text-zinc-400 flex items-center gap-2">
@@ -922,6 +932,27 @@ export default function App() {
                 />
                 <p className="text-[10px] text-zinc-500">
                   Higher threshold reduces false positives but might miss some vehicles.
+                </p>
+              </div>
+
+              <div className="space-y-4">
+                <div className="flex justify-between items-center">
+                  <label className="text-sm font-medium text-zinc-400">Detection Speed</label>
+                  <span className="text-emerald-500 font-mono font-bold">
+                    {detectionInterval <= 30 ? 'Max' : (detectionInterval >= 200 ? 'Eco' : 'Balanced')}
+                  </span>
+                </div>
+                <input 
+                  type="range" 
+                  min="30" 
+                  max="300" 
+                  step="10" 
+                  value={detectionInterval}
+                  onChange={(e) => setDetectionInterval(parseInt(e.target.value))}
+                  className="w-full h-2 bg-zinc-800 rounded-lg appearance-none cursor-pointer accent-emerald-500"
+                />
+                <p className="text-[10px] text-zinc-500">
+                  Lower speed (Eco) makes video smoother but might miss fast vehicles. Max speed is more accurate but uses more CPU.
                 </p>
               </div>
 
