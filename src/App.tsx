@@ -18,7 +18,10 @@ import {
   X,
   ArrowDownLeft,
   ArrowUpRight,
-  RefreshCw
+  RefreshCw,
+  Activity,
+  RotateCcw,
+  History as HistoryIcon
 } from 'lucide-react';
 import { clsx, type ClassValue } from 'clsx';
 import { twMerge } from 'tailwind-merge';
@@ -51,7 +54,6 @@ interface TrackedObject {
   id: number;
   class: string;
   lastCentroid: Point;
-  velocity: Point;
   path: Point[];
   lastSeen: number;
   counted: boolean;
@@ -101,12 +103,12 @@ export default function App() {
   const [showSettings, setShowSettings] = useState(false);
   const [showStreamInput, setShowStreamInput] = useState(false);
   const [streamUrl, setStreamUrl] = useState('');
-  const [confidenceThreshold, setConfidenceThreshold] = useState(0.4); // Lowered default
+  const [confidenceThreshold, setConfidenceThreshold] = useState(0.4); // Lowered for better sensitivity
   const [debugMode, setDebugMode] = useState(false);
-  const [modelBase, setModelBase] = useState<'lite_mobilenet_v2' | 'mobilenet_v2' | 'mobilenet_v1'>('lite_mobilenet_v2');
+  const [modelBase, setModelBase] = useState<'lite_mobilenet_v2' | 'mobilenet_v2' | 'mobilenet_v1'>('mobilenet_v2'); // Default to more accurate model
   const [isModelLoading, setIsModelLoading] = useState(false);
   const [facingMode, setFacingMode] = useState<'user' | 'environment'>('environment');
-  const [detectionInterval, setDetectionInterval] = useState(80); // Default 80ms (~12 FPS)
+  const [isStuck, setIsStuck] = useState(false);
 
   useEffect(() => {
     if (source !== 'stream' || !isPlaying) {
@@ -118,9 +120,10 @@ export default function App() {
       if (videoRef.current) {
         const currentTime = videoRef.current.currentTime;
         // If time hasn't changed and video is not paused, it might be stuck
-        if (currentTime === lastVideoTimeRef.current && !videoRef.current.paused) {
-          stuckDurationRef.current += 2;
-          if (stuckDurationRef.current >= 8) { // 8 seconds stuck
+        if (currentTime === lastVideoTimeRef.current && !videoRef.current.paused && isPlaying) {
+          stuckDurationRef.current += 1;
+          if (stuckDurationRef.current >= 3) setIsStuck(true);
+          if (stuckDurationRef.current >= 6) { // 6 seconds stuck
             console.log("Stream stuck detected, auto-reloading...");
             const currentSrc = videoRef.current.src;
             videoRef.current.src = "";
@@ -128,13 +131,15 @@ export default function App() {
             videoRef.current.src = currentSrc;
             videoRef.current.play().catch(() => {});
             stuckDurationRef.current = 0;
+            setIsStuck(false);
           }
         } else {
           lastVideoTimeRef.current = currentTime;
           stuckDurationRef.current = 0;
+          if (isStuck) setIsStuck(false);
         }
       }
-    }, 2000);
+    }, 1000);
 
     return () => clearInterval(checkInterval);
   }, [source, isPlaying]);
@@ -160,14 +165,18 @@ export default function App() {
 
   // Intersection logic: Check if segment (a, b) crosses segment (c, d)
   const intersects = (a: Point, b: Point, c: Point, d: Point) => {
-    const det = (b.x - a.x) * (d.y - c.y) - (d.x - c.x) * (b.y - a.y);
-    if (det === 0) return false;
-    const lambda = ((d.y - c.y) * (d.x - a.x) + (c.x - d.x) * (d.y - a.y)) / det;
-    const gamma = ((a.y - b.y) * (d.x - a.x) + (b.x - a.x) * (d.y - a.y)) / det;
-    return (0 < lambda && lambda < 1) && (0 < gamma && gamma < 1);
+    const ccw = (p1: Point, p2: Point, p3: Point) => {
+      return (p3.y - p1.y) * (p2.x - p1.x) > (p2.y - p1.y) * (p3.x - p1.x);
+    };
+    return ccw(a, c, d) !== ccw(b, c, d) && ccw(a, b, c) !== ccw(a, b, d);
   };
 
   // Tracking and Counting Logic
+  // Helper to determine which side of the line a point is on
+  const getSide = (p: Point, l: Line) => {
+    return (p.x - l.p1.x) * (l.p2.y - l.p1.y) - (p.y - l.p1.y) * (l.p2.x - l.p1.x);
+  };
+
   const processDetections = useCallback((detections: cocoSsd.DetectedObject[]) => {
     const now = Date.now();
     const currentDetections: Detection[] = detections
@@ -188,22 +197,21 @@ export default function App() {
     // Match existing tracked objects to new detections
     trackedObjectsRef.current.forEach(tracked => {
       let bestMatch = -1;
-      let minDist = 150; // Increased distance for low FPS (from 50 to 150)
+      
+      // Parameters optimized for accuracy and low FPS resilience
+      const minDistThreshold = 250; // Further increased to handle very fast vehicles/low FPS
+      const keepAliveTime = 3500;   // Even longer keep alive for unstable streams
+      const minPathLength = 2;      // Keep at 2 for maximum sensitivity
 
-      // Predict next position based on velocity
-      const predictedCentroid = {
-        x: tracked.lastCentroid.x + tracked.velocity.x,
-        y: tracked.lastCentroid.y + tracked.velocity.y
-      };
+      let minDist = minDistThreshold;
 
       currentDetections.forEach((det, idx) => {
         if (usedDetectionIndices.has(idx)) return;
         if (det.class !== tracked.class) return;
 
-        // Distance from predicted position is more accurate than from last position
         const dist = Math.sqrt(
-          Math.pow(det.centroid.x - predictedCentroid.x, 2) +
-          Math.pow(det.centroid.y - predictedCentroid.y, 2)
+          Math.pow(det.centroid.x - tracked.lastCentroid.x, 2) +
+          Math.pow(det.centroid.y - tracked.lastCentroid.y, 2)
         );
 
         if (dist < minDist) {
@@ -216,24 +224,21 @@ export default function App() {
         const det = currentDetections[bestMatch];
         usedDetectionIndices.add(bestMatch);
 
-        // Calculate new velocity (smoothed)
-        const newVelocity = {
-          x: (det.centroid.x - tracked.lastCentroid.x) * 0.7 + tracked.velocity.x * 0.3,
-          y: (det.centroid.y - tracked.lastCentroid.y) * 0.7 + tracked.velocity.y * 0.3
-        };
-
         // Check for line crossing
-        if (!tracked.counted && line) {
-          if (intersects(tracked.lastCentroid, det.centroid, line.p1, line.p2)) {
+        if (!tracked.counted && line && tracked.path.length >= minPathLength) {
+          const sideBefore = getSide(tracked.lastCentroid, line);
+          const sideAfter = getSide(det.centroid, line);
+          
+          // Only count if:
+          // 1. Clear intersection of the path segment with the line
+          // 2. The crossing is "real" (side change)
+          if (intersects(tracked.lastCentroid, det.centroid, line.p1, line.p2) && (sideBefore * sideAfter < 0)) {
             let vehicleType: keyof CountData = 'other';
             if (det.class === 'car') vehicleType = 'car';
             else if (det.class === 'truck') vehicleType = 'truck';
             else if (det.class === 'bus') vehicleType = 'bus';
             else if (det.class === 'motorcycle') vehicleType = 'motorcycle';
             
-            // Determine direction using cross product
-            // (p.x - lineP1.x) * (lineP2.y - lineP1.y) - (p.y - lineP1.y) * (lineP2.x - lineP1.x)
-            const sideBefore = (tracked.lastCentroid.x - line.p1.x) * (line.p2.y - line.p1.y) - (tracked.lastCentroid.y - line.p1.y) * (line.p2.x - line.p1.x);
             const direction: 'inbound' | 'outbound' = sideBefore > 0 ? 'inbound' : 'outbound';
 
             if (direction === 'inbound') {
@@ -253,21 +258,14 @@ export default function App() {
         updatedTracked.push({
           ...tracked,
           lastCentroid: det.centroid,
-          velocity: newVelocity,
           path: [...tracked.path.slice(-10), det.centroid],
           lastSeen: now
         });
-      } else if (now - tracked.lastSeen < 1500) { // Keep alive for 1.5s (increased for low FPS)
-        // If not matched, still keep it for a while but update with predicted position
-        const predictedCentroid = {
-          x: tracked.lastCentroid.x + tracked.velocity.x,
-          y: tracked.lastCentroid.y + tracked.velocity.y
-        };
-        
+      } else if (now - tracked.lastSeen < keepAliveTime) { 
+        // If not matched, still keep it for a while to handle temporary occlusions
         updatedTracked.push({
           ...tracked,
-          lastCentroid: predictedCentroid,
-          path: [...tracked.path.slice(-10), predictedCentroid],
+          path: [...tracked.path.slice(-10)],
         });
       }
     });
@@ -279,7 +277,6 @@ export default function App() {
           id: nextIdRef.current++,
           class: det.class,
           lastCentroid: det.centroid,
-          velocity: { x: 0, y: 0 },
           path: [det.centroid],
           lastSeen: now,
           counted: false
@@ -396,23 +393,30 @@ export default function App() {
     });
   }, [line, isDrawing, drawingStart, previewPoint, debugMode, confidenceThreshold]);
 
+  const reloadStream = useCallback(() => {
+    if (videoRef.current && (source === 'stream' || streamUrl)) {
+      console.log("Manual stream reload triggered");
+      const currentSrc = videoRef.current.src || streamUrl;
+      videoRef.current.src = "";
+      videoRef.current.load();
+      videoRef.current.src = currentSrc;
+      videoRef.current.play().catch(() => {});
+      stuckDurationRef.current = 0;
+    }
+  }, [source, streamUrl]);
+
   // Main Loop
   const detectFrame = useCallback(async () => {
     if (!videoRef.current || !modelRef.current) return;
     if (!isPlaying) return;
 
-    const now = Date.now();
-    // Throttle detection to prevent UI stuttering
-    if (now - lastDetectionTimeRef.current >= detectionInterval) {
-      lastDetectionTimeRef.current = now;
-      const detections = await modelRef.current.detect(videoRef.current);
-      const mappedDetections = detections.map(d => ({
-        ...d,
-        class: (d.class === 'person' || d.class === 'bicycle') ? 'motorcycle' : d.class
-      }));
-      lastDetectionsRef.current = mappedDetections;
-      processDetections(mappedDetections);
-    }
+    const detections = await modelRef.current.detect(videoRef.current);
+    const mappedDetections = detections.map(d => ({
+      ...d,
+      class: (d.class === 'person' || d.class === 'bicycle') ? 'motorcycle' : d.class
+    }));
+    lastDetectionsRef.current = mappedDetections;
+    processDetections(mappedDetections);
     
     // Always render the current state (including drawing previews)
     render();
@@ -596,6 +600,17 @@ export default function App() {
           
           <div className="flex items-center gap-2">
             <button 
+              onClick={() => {
+                setInboundCounts({ car: 0, truck: 0, bus: 0, motorcycle: 0, other: 0 });
+                setOutboundCounts({ car: 0, truck: 0, bus: 0, motorcycle: 0, other: 0 });
+                setHistory([]);
+              }}
+              className="p-1.5 hover:bg-zinc-800 rounded-full transition-colors"
+              title="Reset Counts"
+            >
+              <RotateCcw className="w-4 h-4 text-zinc-400" />
+            </button>
+            <button 
               onClick={() => setShowSettings(!showSettings)}
               className="p-1.5 hover:bg-zinc-800 rounded-full transition-colors"
             >
@@ -740,6 +755,15 @@ export default function App() {
                   >
                     {isPlaying ? <Pause className="w-4 h-4" /> : <Play className="w-4 h-4" />}
                   </button>
+                  {source === 'stream' && (
+                    <button 
+                      onClick={reloadStream}
+                      className="p-1.5 hover:bg-white/10 rounded-md transition-colors"
+                      title="Reload Stream"
+                    >
+                      <RefreshCw className="w-4 h-4" />
+                    </button>
+                  )}
                   {source === 'camera' && (
                     <button 
                       onClick={toggleCamera}
@@ -757,8 +781,18 @@ export default function App() {
                   </button>
                 </div>
                 
-                <div className="bg-black/60 backdrop-blur-md px-2 py-1 rounded-lg border border-white/10 text-[10px] font-mono text-emerald-400 uppercase tracking-wider">
-                  Live Detection
+                <div className="bg-black/60 backdrop-blur-md px-2 py-1 rounded-lg border border-white/10 text-[10px] font-mono text-emerald-400 uppercase tracking-wider flex items-center gap-2">
+                  {isStuck ? (
+                    <>
+                      <div className="w-1.5 h-1.5 bg-red-500 rounded-full animate-pulse" />
+                      <span className="text-red-400">Stream Frozen</span>
+                    </>
+                  ) : (
+                    <>
+                      <div className="w-1.5 h-1.5 bg-emerald-500 rounded-full animate-pulse" />
+                      <span>Live Detection</span>
+                    </>
+                  )}
                 </div>
               </div>
             )}
@@ -868,9 +902,8 @@ export default function App() {
                 </label>
                 <div className="grid grid-cols-1 gap-2">
                   {[
-                    { id: 'lite_mobilenet_v2', name: 'Lite MobileNet V2', desc: 'Fastest, optimized for mobile/web' },
-                    { id: 'mobilenet_v2', name: 'MobileNet V2', desc: 'Balanced speed and accuracy' },
-                    { id: 'mobilenet_v1', name: 'MobileNet V1', desc: 'Legacy model' }
+                    { id: 'mobilenet_v2', name: 'High Accuracy', desc: 'MobileNet V2 - Recommended for counting' },
+                    { id: 'lite_mobilenet_v2', name: 'High Speed', desc: 'Lite MobileNet V2 - Optimized for performance' }
                   ].map((m) => (
                     <button
                       key={m.id}
@@ -932,27 +965,6 @@ export default function App() {
                 />
                 <p className="text-[10px] text-zinc-500">
                   Higher threshold reduces false positives but might miss some vehicles.
-                </p>
-              </div>
-
-              <div className="space-y-4">
-                <div className="flex justify-between items-center">
-                  <label className="text-sm font-medium text-zinc-400">Detection Speed</label>
-                  <span className="text-emerald-500 font-mono font-bold">
-                    {detectionInterval <= 30 ? 'Max' : (detectionInterval >= 200 ? 'Eco' : 'Balanced')}
-                  </span>
-                </div>
-                <input 
-                  type="range" 
-                  min="30" 
-                  max="300" 
-                  step="10" 
-                  value={detectionInterval}
-                  onChange={(e) => setDetectionInterval(parseInt(e.target.value))}
-                  className="w-full h-2 bg-zinc-800 rounded-lg appearance-none cursor-pointer accent-emerald-500"
-                />
-                <p className="text-[10px] text-zinc-500">
-                  Lower speed (Eco) makes video smoother but might miss fast vehicles. Max speed is more accurate but uses more CPU.
                 </p>
               </div>
 
