@@ -70,7 +70,7 @@ interface HistoryItem {
   direction: 'inbound' | 'outbound';
 }
 
-const VEHICLE_CLASSES = ['car', 'truck', 'bus', 'motorcycle', 'bicycle', 'person'];
+const VEHICLE_CLASSES = ['car', 'truck', 'bus', 'motorcycle'];
 
 export default function App() {
   // Refs
@@ -177,7 +177,7 @@ export default function App() {
             if (det.class === 'car') vehicleType = 'car';
             else if (det.class === 'truck') vehicleType = 'truck';
             else if (det.class === 'bus') vehicleType = 'bus';
-            else if (det.class === 'motorcycle' || det.class === 'bicycle' || det.class === 'person') vehicleType = 'motorcycle';
+            else if (det.class === 'motorcycle') vehicleType = 'motorcycle';
             
             // Determine direction using cross product
             // (p.x - lineP1.x) * (lineP2.y - lineP1.y) - (p.y - lineP1.y) * (lineP2.x - lineP1.x)
@@ -339,8 +339,12 @@ export default function App() {
     if (!isPlaying) return;
 
     const detections = await modelRef.current.detect(videoRef.current);
-    lastDetectionsRef.current = detections;
-    processDetections(detections);
+    const mappedDetections = detections.map(d => ({
+      ...d,
+      class: (d.class === 'person' || d.class === 'bicycle') ? 'motorcycle' : d.class
+    }));
+    lastDetectionsRef.current = mappedDetections;
+    processDetections(mappedDetections);
     render();
 
     if (isPlaying) {
