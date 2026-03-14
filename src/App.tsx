@@ -83,6 +83,8 @@ export default function App() {
   const trackedObjectsRef = useRef<TrackedObject[]>([]);
   const nextIdRef = useRef(1);
   const lastDetectionsRef = useRef<cocoSsd.DetectedObject[]>([]);
+  const lastVideoTimeRef = useRef<number>(0);
+  const stuckDurationRef = useRef<number>(0);
 
   // State
   const [isLoading, setIsLoading] = useState(true);
@@ -103,6 +105,37 @@ export default function App() {
   const [modelBase, setModelBase] = useState<'lite_mobilenet_v2' | 'mobilenet_v2' | 'mobilenet_v1'>('lite_mobilenet_v2');
   const [isModelLoading, setIsModelLoading] = useState(false);
   const [facingMode, setFacingMode] = useState<'user' | 'environment'>('environment');
+
+  useEffect(() => {
+    if (source !== 'stream' || !isPlaying) {
+      stuckDurationRef.current = 0;
+      return;
+    }
+
+    const checkInterval = setInterval(() => {
+      if (videoRef.current) {
+        const currentTime = videoRef.current.currentTime;
+        // If time hasn't changed and video is not paused, it might be stuck
+        if (currentTime === lastVideoTimeRef.current && !videoRef.current.paused) {
+          stuckDurationRef.current += 2;
+          if (stuckDurationRef.current >= 8) { // 8 seconds stuck
+            console.log("Stream stuck detected, auto-reloading...");
+            const currentSrc = videoRef.current.src;
+            videoRef.current.src = "";
+            videoRef.current.load();
+            videoRef.current.src = currentSrc;
+            videoRef.current.play().catch(() => {});
+            stuckDurationRef.current = 0;
+          }
+        } else {
+          lastVideoTimeRef.current = currentTime;
+          stuckDurationRef.current = 0;
+        }
+      }
+    }, 2000);
+
+    return () => clearInterval(checkInterval);
+  }, [source, isPlaying]);
 
   // Initialize Model
   useEffect(() => {
@@ -656,10 +689,24 @@ export default function App() {
                 setIsPlaying(true);
                 detectFrame(true);
               }}
-              onError={() => {
-                alert("Failed to load video stream.");
-                setSource(null);
-                setIsPlaying(false);
+              onError={(e) => {
+                console.error("Video error detected:", e);
+                if (source === 'stream') {
+                  // Auto retry for streams
+                  setTimeout(() => {
+                    if (videoRef.current && streamUrl) {
+                      const currentSrc = videoRef.current.src || streamUrl;
+                      videoRef.current.src = "";
+                      videoRef.current.load();
+                      videoRef.current.src = currentSrc;
+                      videoRef.current.play().catch(() => {});
+                    }
+                  }, 3000);
+                } else {
+                  alert("Failed to load video source.");
+                  setSource(null);
+                  setIsPlaying(false);
+                }
               }}
             />
             <canvas
