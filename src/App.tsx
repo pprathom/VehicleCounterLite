@@ -17,7 +17,8 @@ import {
   Plus,
   X,
   ArrowDownLeft,
-  ArrowUpRight
+  ArrowUpRight,
+  RefreshCw
 } from 'lucide-react';
 import { clsx, type ClassValue } from 'clsx';
 import { twMerge } from 'tailwind-merge';
@@ -50,6 +51,7 @@ interface TrackedObject {
   id: number;
   class: string;
   lastCentroid: Point;
+  velocity: Point;
   path: Point[];
   lastSeen: number;
   counted: boolean;
@@ -100,6 +102,7 @@ export default function App() {
   const [debugMode, setDebugMode] = useState(false);
   const [modelBase, setModelBase] = useState<'lite_mobilenet_v2' | 'mobilenet_v2' | 'mobilenet_v1'>('lite_mobilenet_v2');
   const [isModelLoading, setIsModelLoading] = useState(false);
+  const [facingMode, setFacingMode] = useState<'user' | 'environment'>('environment');
 
   // Initialize Model
   useEffect(() => {
@@ -149,15 +152,22 @@ export default function App() {
     // Match existing tracked objects to new detections
     trackedObjectsRef.current.forEach(tracked => {
       let bestMatch = -1;
-      let minDist = 50; // Max distance to associate
+      let minDist = 150; // Increased distance for low FPS (from 50 to 150)
+
+      // Predict next position based on velocity
+      const predictedCentroid = {
+        x: tracked.lastCentroid.x + tracked.velocity.x,
+        y: tracked.lastCentroid.y + tracked.velocity.y
+      };
 
       currentDetections.forEach((det, idx) => {
         if (usedDetectionIndices.has(idx)) return;
         if (det.class !== tracked.class) return;
 
+        // Distance from predicted position is more accurate than from last position
         const dist = Math.sqrt(
-          Math.pow(det.centroid.x - tracked.lastCentroid.x, 2) +
-          Math.pow(det.centroid.y - tracked.lastCentroid.y, 2)
+          Math.pow(det.centroid.x - predictedCentroid.x, 2) +
+          Math.pow(det.centroid.y - predictedCentroid.y, 2)
         );
 
         if (dist < minDist) {
@@ -169,6 +179,12 @@ export default function App() {
       if (bestMatch !== -1) {
         const det = currentDetections[bestMatch];
         usedDetectionIndices.add(bestMatch);
+
+        // Calculate new velocity (smoothed)
+        const newVelocity = {
+          x: (det.centroid.x - tracked.lastCentroid.x) * 0.7 + tracked.velocity.x * 0.3,
+          y: (det.centroid.y - tracked.lastCentroid.y) * 0.7 + tracked.velocity.y * 0.3
+        };
 
         // Check for line crossing
         if (!tracked.counted && line) {
@@ -201,12 +217,22 @@ export default function App() {
         updatedTracked.push({
           ...tracked,
           lastCentroid: det.centroid,
+          velocity: newVelocity,
           path: [...tracked.path.slice(-10), det.centroid],
           lastSeen: now
         });
-      } else if (now - tracked.lastSeen < 1000) {
-        // Keep for a bit even if not seen
-        updatedTracked.push(tracked);
+      } else if (now - tracked.lastSeen < 1500) { // Keep alive for 1.5s (increased for low FPS)
+        // If not matched, still keep it for a while but update with predicted position
+        const predictedCentroid = {
+          x: tracked.lastCentroid.x + tracked.velocity.x,
+          y: tracked.lastCentroid.y + tracked.velocity.y
+        };
+        
+        updatedTracked.push({
+          ...tracked,
+          lastCentroid: predictedCentroid,
+          path: [...tracked.path.slice(-10), predictedCentroid],
+        });
       }
     });
 
@@ -217,6 +243,7 @@ export default function App() {
           id: nextIdRef.current++,
           class: det.class,
           lastCentroid: det.centroid,
+          velocity: { x: 0, y: 0 },
           path: [det.centroid],
           lastSeen: now,
           counted: false
@@ -382,17 +409,33 @@ export default function App() {
     }
   };
 
-  const startCamera = async () => {
+  const startCamera = async (mode?: 'user' | 'environment') => {
     try {
-      const stream = await navigator.mediaDevices.getUserMedia({ video: true });
+      // Stop existing stream if any
+      if (videoRef.current && videoRef.current.srcObject) {
+        const stream = videoRef.current.srcObject as MediaStream;
+        stream.getTracks().forEach(track => track.stop());
+      }
+
+      const targetMode = mode || facingMode;
+      const stream = await navigator.mediaDevices.getUserMedia({ 
+        video: { facingMode: targetMode } 
+      });
+      
       if (videoRef.current) {
         videoRef.current.srcObject = stream;
         setSource('camera');
+        setFacingMode(targetMode);
         setIsPlaying(true);
       }
     } catch (err) {
       console.error("Camera access denied:", err);
     }
+  };
+
+  const toggleCamera = () => {
+    const newMode = facingMode === 'user' ? 'environment' : 'user';
+    startCamera(newMode);
   };
 
   const stopVideo = () => {
@@ -494,7 +537,7 @@ export default function App() {
   }
 
   return (
-    <div className="min-h-screen bg-[#0a0a0a] text-zinc-100 font-sans selection:bg-emerald-500/30 flex flex-col overflow-hidden">
+    <div className="min-h-screen bg-[#0a0a0a] text-zinc-100 font-sans selection:bg-emerald-500/30 flex flex-col lg:overflow-hidden">
       {/* Header */}
       <header className="border-b border-zinc-800 bg-zinc-900/50 backdrop-blur-md z-50 flex-shrink-0">
         <div className="max-w-7xl mx-auto px-4 h-12 flex items-center justify-between">
@@ -527,11 +570,11 @@ export default function App() {
         </div>
       </header>
 
-      <main className="flex-1 max-w-7xl mx-auto w-full p-4 grid grid-cols-1 lg:grid-cols-12 gap-4 overflow-hidden">
+      <main className="flex-1 max-w-7xl mx-auto w-full p-4 grid grid-cols-1 lg:grid-cols-12 gap-4 lg:overflow-hidden overflow-y-auto">
         {/* Left Column: Video & Controls */}
-        <div className="lg:col-span-9 flex flex-col gap-4 overflow-hidden">
+        <div className="lg:col-span-9 flex flex-col gap-4 lg:overflow-hidden">
           {/* Video Container */}
-          <div className="relative flex-1 bg-zinc-900 rounded-2xl overflow-hidden border border-zinc-800 shadow-2xl group min-h-0">
+          <div className="relative flex-1 bg-zinc-900 rounded-2xl overflow-hidden border border-zinc-800 shadow-2xl group min-h-[300px] lg:min-h-0">
             {!source && (
               <div className="absolute inset-0 flex flex-col items-center justify-center p-4 text-center">
                 <div className="w-16 h-16 bg-zinc-800 rounded-full flex items-center justify-center mb-4 group-hover:scale-110 transition-transform duration-500">
@@ -541,7 +584,7 @@ export default function App() {
                 <p className="text-zinc-500 text-xs max-w-xs mb-6">
                   Upload a video file, use your webcam, or connect to a stream to start counting.
                 </p>
-                <div className="flex flex-wrap justify-center gap-2">
+                <div className="flex flex-col sm:flex-row justify-center gap-2 w-full max-w-xs sm:max-w-none">
                   {!showStreamInput ? (
                     <>
                       <button 
@@ -632,7 +675,7 @@ export default function App() {
 
             {/* Overlay Controls */}
             {source && (
-              <div className="absolute bottom-4 left-4 right-4 flex items-center justify-between opacity-0 group-hover:opacity-100 transition-opacity duration-300">
+              <div className="absolute bottom-4 left-4 right-4 flex items-center justify-between lg:opacity-0 lg:group-hover:opacity-100 transition-opacity duration-300">
                 <div className="flex items-center gap-2 bg-black/60 backdrop-blur-md p-1 rounded-lg border border-white/10">
                   <button 
                     onClick={() => setIsPlaying(!isPlaying)}
@@ -640,6 +683,15 @@ export default function App() {
                   >
                     {isPlaying ? <Pause className="w-4 h-4" /> : <Play className="w-4 h-4" />}
                   </button>
+                  {source === 'camera' && (
+                    <button 
+                      onClick={toggleCamera}
+                      className="p-1.5 hover:bg-white/10 rounded-md transition-colors"
+                      title="Switch Camera"
+                    >
+                      <RefreshCw className="w-4 h-4" />
+                    </button>
+                  )}
                   <button 
                     onClick={stopVideo}
                     className="p-1.5 hover:bg-red-500/20 text-red-400 rounded-md transition-colors"

@@ -1,5 +1,5 @@
 {
-  "name": "Vehicle Counter & Classifier (YOLO)",
+  "name": "Vehicle Counter & Classifier",
   "description": "A real-time vehicle counting and classification tool using YOLO. Supports video files, streams, and camera input with custom counting lines and CSV export.",
   "requestFramePermissions": [
     "camera"
